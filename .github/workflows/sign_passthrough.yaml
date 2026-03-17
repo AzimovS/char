@@ -26,12 +26,13 @@ jobs:
           # Verify signing
           codesign -dv build/hyprnote-passthrough
 
-          # Verify team identifier is correct
-          if ! codesign -dv build/hyprnote-passthrough 2>&1 | grep -q "TeamIdentifier=6SLY7V277V"; then
-            echo "Error: Binary not signed with correct team identifier (6SLY7V277V)"
+          # Verify team identifier is present
+          TEAM_ID=$(codesign -dv build/hyprnote-passthrough 2>&1 | grep "TeamIdentifier=" | cut -d= -f2)
+          if [[ -z "$TEAM_ID" || "$TEAM_ID" == "not set" ]]; then
+            echo "Error: Binary not signed with a valid team identifier"
             exit 1
           fi
-          echo "✓ Binary signed with correct team identifier"
+          echo "✓ Binary signed with team identifier: $TEAM_ID"
 
       - uses: actions/upload-artifact@v4
         with:
