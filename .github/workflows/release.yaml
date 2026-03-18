@@ -23,10 +23,10 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             arch: aarch64
-            runner: macos-14
+            runner: macos-15
           - target: x86_64-apple-darwin
             arch: x86_64
-            runner: macos-13
+            runner: macos-15
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
