@@ -17,17 +17,7 @@ env:
 
 jobs:
   build-macos:
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            arch: aarch64
-            runner: macos-15
-          - target: x86_64-apple-darwin
-            arch: x86_64
-            runner: macos-13
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,7 +35,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -60,7 +50,7 @@ jobs:
 
       - run: ./scripts/version.sh "./apps/desktop/src-tauri/tauri.conf.json" "${{ inputs.version }}"
 
-      - run: pnpm -F desktop tauri build --target ${{ matrix.target }} --config ${{ env.TAURI_CONF_PATH }} --verbose
+      - run: pnpm -F desktop tauri build --target aarch64-apple-darwin --config ${{ env.TAURI_CONF_PATH }} --verbose
         env:
           CI: false
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -78,12 +68,12 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}
+          name: macos-aarch64
           path: |
-            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
-            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
-            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
-            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/latest.json
+            apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+            apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/latest.json
 
   publish:
     needs: build-macos
