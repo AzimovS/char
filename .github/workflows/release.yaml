@@ -1,0 +1,107 @@
+name: Release Desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g., 1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  TAURI_CONF_PATH: ./src-tauri/tauri.conf.azimov.json
+  NODE_OPTIONS: "--max-old-space-size=4096"
+
+jobs:
+  build-macos:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: aarch64
+            runner: macos-14
+          - target: x86_64-apple-darwin
+            arch: x86_64
+            runner: macos-13
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          submodules: recursive
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install
+      - run: pnpm -F @hypr/ui build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - uses: ./.github/actions/apple_cert
+        id: apple-cert
+        with:
+          apple-certificate: ${{ secrets.APPLE_CERTIFICATE }}
+          apple-certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          keychain-password: ${{ secrets.KEYCHAIN_PASSWORD }}
+
+      - run: ./scripts/version.sh "./apps/desktop/src-tauri/tauri.conf.json" "${{ inputs.version }}"
+
+      - run: pnpm -F desktop tauri build --target ${{ matrix.target }} --config ${{ env.TAURI_CONF_PATH }} --verbose
+        env:
+          CI: false
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.apple-cert.outputs.cert-id }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY || 'phc_disabled' }}
+          APP_VERSION: ${{ inputs.version }}
+          VITE_APP_VERSION: ${{ inputs.version }}
+          VITE_API_URL: ${{ secrets.VITE_API_URL || 'https://api.char.com' }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+            apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/macos/latest.json
+
+  publish:
+    needs: build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - run: |
+          mkdir release-files
+          find artifacts -type f \( -name "*.dmg" -o -name "*.tar.gz" -o -name "*.sig" -o -name "latest.json" \) -exec cp {} release-files/ \;
+          ls -la release-files/
+
+      - uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ inputs.version }}
+          name: v${{ inputs.version }}
+          artifacts: "release-files/*"
+          makeLatest: true
