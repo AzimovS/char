@@ -16,7 +16,7 @@ export const runBatchSession = async <T extends BatchStore>(
   sessionId: string,
   params: BatchParams,
 ) => {
-  get().handleBatchStarted(sessionId);
+  get().handleBatchStarted(sessionId, "uploading");
 
   let unlisten: (() => void) | undefined;
   let settled = false;

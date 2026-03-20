@@ -71,6 +71,7 @@ impl ElevenLabsAdapter {
             ))
         })?;
 
+        let timeout = crate::http_client::timeout_for_file_size(file_bytes.len() as u64);
         let default = crate::providers::Provider::ElevenLabs.default_batch_model();
         let model = match params.model.as_deref() {
             Some(m) if crate::providers::is_meta_model(m) => default,
@@ -101,6 +102,7 @@ impl ElevenLabsAdapter {
             .post(&url)
             .header("xi-api-key", api_key)
             .multipart(form)
+            .timeout(timeout)
             .send()
             .await?;
 

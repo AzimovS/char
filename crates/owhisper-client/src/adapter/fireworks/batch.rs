@@ -62,6 +62,7 @@ impl FireworksAdapter {
             ))
         })?;
 
+        let timeout = crate::http_client::timeout_for_file_size(file_bytes.len() as u64);
         let file_part = reqwest::multipart::Part::bytes(file_bytes).file_name(file_name);
         let mut form = reqwest::multipart::Form::new().part("file", file_part);
 
@@ -89,6 +90,7 @@ impl FireworksAdapter {
             .post(&url)
             .header("Authorization", api_key)
             .multipart(form)
+            .timeout(timeout)
             .send()
             .await?;
 

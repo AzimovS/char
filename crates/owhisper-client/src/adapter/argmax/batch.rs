@@ -49,6 +49,7 @@ async fn do_transcribe_file(
     file_path: PathBuf,
 ) -> Result<BatchResponse, Error> {
     let (audio_data, sample_rate) = decode_audio_to_linear16(file_path).await?;
+    let timeout = crate::http_client::timeout_for_file_size(audio_data.len() as u64);
 
     let url = {
         let mut url = build_batch_url(
@@ -69,6 +70,7 @@ async fn do_transcribe_file(
         .header("Authorization", format!("Token {}", api_key))
         .header("Accept", "application/json")
         .header("Content-Type", content_type)
+        .timeout(timeout)
         .body(audio_data)
         .send()
         .await?;
