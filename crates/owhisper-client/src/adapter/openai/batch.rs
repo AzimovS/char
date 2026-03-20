@@ -88,6 +88,7 @@ async fn do_transcribe_file(
         .await
         .map_err(|e| Error::AudioProcessing(e.to_string()))?;
 
+    let timeout = crate::http_client::timeout_for_file_size(file_bytes.len() as u64);
     let mime_type = mime_type_from_extension(&file_path);
 
     let file_part = Part::bytes(file_bytes)
@@ -135,6 +136,7 @@ async fn do_transcribe_file(
         .post(url.to_string())
         .header("Authorization", format!("Bearer {}", api_key))
         .multipart(form)
+        .timeout(timeout)
         .send()
         .await?;
 

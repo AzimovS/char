@@ -67,10 +67,12 @@ async fn do_transcribe_file(
         .await
         .map_err(|e| Error::AudioProcessing(format!("failed to read file: {e}")))?;
 
+    let timeout = crate::http_client::timeout_for_file_size(bytes.len() as u64);
     let response = client
         .post(url.to_string())
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", mime_type_from_extension(&file_path))
+        .timeout(timeout)
         .body(bytes)
         .send()
         .await?;
