@@ -67,6 +67,24 @@ jobs:
           VITE_APP_VERSION: ${{ inputs.version }}
           VITE_API_URL: ${{ secrets.VITE_API_URL || 'https://api.char.com' }}
 
+      - name: Generate latest.json for updater
+        run: |
+          BUNDLE_DIR="apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos"
+          SIG=$(cat "$BUNDLE_DIR/Char.app.tar.gz.sig")
+          cat > "$BUNDLE_DIR/latest.json" << EOF
+          {
+            "version": "${{ inputs.version }}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "darwin-aarch64": {
+                "url": "https://github.com/AzimovS/char/releases/download/v${{ inputs.version }}/Char.app.tar.gz",
+                "signature": "$SIG"
+              }
+            }
+          }
+          EOF
+          cat "$BUNDLE_DIR/latest.json"
+
       - uses: actions/upload-artifact@v4
         with:
           name: macos-aarch64
