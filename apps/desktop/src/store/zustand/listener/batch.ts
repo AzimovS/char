@@ -11,7 +11,7 @@ import {
   type WordLike,
 } from "~/stt/segment";
 
-export type BatchPhase = "importing" | "transcribing";
+export type BatchPhase = "importing" | "uploading" | "transcribing";
 
 export type BatchState = {
   batch: Record<

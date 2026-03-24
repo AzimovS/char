@@ -129,6 +129,7 @@ impl AssemblyAIAdapter {
             .await
             .map_err(|e| Error::AudioProcessing(format!("failed to read file: {}", e)))?;
 
+        let upload_timeout = crate::http_client::timeout_for_file_size(audio_data.len() as u64);
         let content_type = match file_path.extension().and_then(|e| e.to_str()) {
             Some("wav") => "audio/wav",
             Some("mp3") => "audio/mpeg",
@@ -145,6 +146,7 @@ impl AssemblyAIAdapter {
             .post(upload_url.to_string())
             .header("Authorization", api_key)
             .header("Content-Type", content_type)
+            .timeout(upload_timeout)
             .body(audio_data)
             .send()
             .await?;

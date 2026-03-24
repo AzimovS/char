@@ -21,3 +21,6 @@ internal
 # Local Netlify folder
 .netlify
 
+# Plan documents
+docs/plans/
+

@@ -158,6 +158,7 @@ impl GladiaAdapter {
             .await
             .map_err(|e| Error::AudioProcessing(format!("failed to read file: {}", e)))?;
 
+        let upload_timeout = crate::http_client::timeout_for_file_size(file_bytes.len() as u64);
         let file_name = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -188,6 +189,7 @@ impl GladiaAdapter {
             .post(upload_url.to_string())
             .header("x-gladia-key", api_key)
             .multipart(form)
+            .timeout(upload_timeout)
             .send()
             .await?;
 

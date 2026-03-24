@@ -229,9 +229,15 @@ pub(super) fn format_user_friendly_error(error: &str) -> String {
     if error_lower.contains("429") || error_lower.contains("rate limit") {
         return "Rate limit exceeded. Please wait a moment and try again.".to_string();
     }
-    if error_lower.contains("timeout") {
-        return "Connection timed out. Please check your internet connection and try again."
-            .to_string();
+    if error_lower.contains("413")
+        || error_lower.contains("too large")
+        || error_lower.contains("payload too large")
+        || error_lower.contains("entity too large")
+    {
+        return "The audio file is too large for this provider. Try a shorter recording or check your provider's file size limits.".to_string();
+    }
+    if error_lower.contains("timeout") || error_lower.contains("timed out") {
+        return "Transcription request timed out. The audio file may be too large for this provider, or the server is unresponsive. Try a shorter recording or a different provider.".to_string();
     }
     if error_lower.contains("connection refused")
         || error_lower.contains("failed to connect")

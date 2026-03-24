@@ -15,7 +15,7 @@ export function TranscriptEmptyState({
   isBatching?: boolean;
   hasAudio?: boolean;
   percentage?: number;
-  phase?: "importing" | "transcribing";
+  phase?: "importing" | "uploading" | "transcribing";
   error?: string | null;
   onUploadAudio?: () => void;
   onUploadTranscript?: () => void;
@@ -51,7 +51,9 @@ export function TranscriptEmptyState({
           <p className="text-sm">
             {phase === "importing"
               ? "Importing audio..."
-              : "Generating transcript..."}
+              : phase === "uploading"
+                ? "Uploading audio..."
+                : "Generating transcript..."}
           </p>
         </div>
       ) : (

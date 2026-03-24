@@ -10,7 +10,7 @@ import { useListener } from "~/stt/contexts";
 import { parseTranscriptWords } from "~/stt/utils";
 
 type ListeningStatus = "listening" | "finalizing";
-type BatchPhase = "importing" | "transcribing";
+type BatchPhase = "importing" | "uploading" | "transcribing";
 type RecordingMode = "memory" | "disk" | null;
 type RequestedTranscriptionMode = "live" | "batch" | null;
 
