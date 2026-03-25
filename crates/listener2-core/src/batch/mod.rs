@@ -264,6 +264,14 @@ async fn run_batch_simple<A: BatchSttAdapter>(
     .await
 }
 
+const CHUNK_CONCURRENCY: usize = 4;
+
+struct ChunkResult {
+    idx: usize,
+    offset_secs: f64,
+    response: owhisper_interface::batch::Response,
+}
+
 async fn run_batch_chunked<A: BatchSttAdapter>(
     runtime: Arc<dyn BatchRuntime>,
     params: BatchParams,
@@ -288,7 +296,8 @@ async fn run_batch_chunked<A: BatchSttAdapter>(
     let total_chunks = chunks.len();
     tracing::info!(
         total_chunks,
-        "split audio into chunks for batch transcription"
+        concurrency = CHUNK_CONCURRENCY,
+        "split audio into chunks for parallel batch transcription"
     );
 
     if chunks.is_empty() {
@@ -310,29 +319,38 @@ async fn run_batch_chunked<A: BatchSttAdapter>(
         });
     }
 
-    let client = owhisper_client::BatchClient::<A>::builder()
-        .api_base(params.base_url.clone())
-        .api_key(params.api_key.clone())
-        .params(listen_params)
-        .build();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(CHUNK_CONCURRENCY));
+    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    let mut all_words: Vec<owhisper_interface::batch::Word> = Vec::new();
-    let mut all_transcripts: Vec<String> = Vec::new();
-    let mut confidence_sum: f64 = 0.0;
-    let mut confidence_count: usize = 0;
-
+    let mut handles = Vec::with_capacity(total_chunks);
     for (idx, chunk) in chunks.iter().enumerate() {
-        let chunk_path = chunk.file.path();
-        tracing::info!(
-            chunk = idx + 1,
-            total = total_chunks,
-            offset_secs = chunk.start_offset_secs,
-            "transcribing chunk"
-        );
+        let semaphore = semaphore.clone();
+        let completed = completed.clone();
+        let runtime = runtime.clone();
+        let session_id = params.session_id.clone();
+        let offset_secs = chunk.start_offset_secs;
+        let chunk_path = chunk.file.path().to_path_buf();
+        let client = owhisper_client::BatchClient::<A>::builder()
+            .api_base(params.base_url.clone())
+            .api_key(params.api_key.clone())
+            .params(listen_params.clone())
+            .build();
 
-        let response = match client.transcribe_file(chunk_path).await {
-            Ok(response) => response,
-            Err(err) => {
+        let handle = tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.map_err(|_| {
+                crate::Error::from(crate::BatchFailure::ProviderRequestFailed {
+                    message: "Chunk semaphore closed".to_string(),
+                })
+            })?;
+
+            tracing::info!(
+                chunk = idx + 1,
+                total = total_chunks,
+                offset_secs,
+                "transcribing chunk"
+            );
+
+            let response = client.transcribe_file(&chunk_path).await.map_err(|err| {
                 let raw_error = format!("{err:?}");
                 let message = format_user_friendly_error(&raw_error);
                 tracing::error!(
@@ -341,11 +359,54 @@ async fn run_batch_chunked<A: BatchSttAdapter>(
                     total = total_chunks,
                     "chunk transcription failed"
                 );
-                return Err(crate::BatchFailure::ProviderRequestFailed { message }.into());
-            }
-        };
+                crate::Error::from(crate::BatchFailure::ProviderRequestFailed { message })
+            })?;
 
-        for channel in &response.results.channels {
+            let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let percentage = done as f64 / total_chunks as f64;
+            runtime.emit(BatchEvent::BatchChunkProgress {
+                session_id: session_id.clone(),
+                chunk: done,
+                total_chunks,
+                percentage,
+            });
+
+            tracing::info!(
+                chunk = idx + 1,
+                total = total_chunks,
+                done,
+                percentage,
+                "chunk transcription completed"
+            );
+
+            Ok::<ChunkResult, crate::Error>(ChunkResult {
+                idx,
+                offset_secs,
+                response,
+            })
+        });
+        handles.push(handle);
+    }
+
+    let mut results = Vec::with_capacity(total_chunks);
+    for handle in handles {
+        let result = handle
+            .await
+            .map_err(|err| crate::BatchFailure::ProviderRequestFailed {
+                message: format!("Chunk task panicked: {err}"),
+            })??;
+        results.push(result);
+    }
+
+    results.sort_by_key(|r| r.idx);
+
+    let mut all_words: Vec<owhisper_interface::batch::Word> = Vec::new();
+    let mut all_transcripts: Vec<String> = Vec::new();
+    let mut confidence_sum: f64 = 0.0;
+    let mut confidence_count: usize = 0;
+
+    for result in &results {
+        for channel in &result.response.results.channels {
             if let Some(alt) = channel.alternatives.first() {
                 let transcript = alt.transcript.trim();
                 if !transcript.is_empty() {
@@ -355,8 +416,8 @@ async fn run_batch_chunked<A: BatchSttAdapter>(
                 for word in &alt.words {
                     all_words.push(owhisper_interface::batch::Word {
                         word: word.word.clone(),
-                        start: word.start + chunk.start_offset_secs,
-                        end: word.end + chunk.start_offset_secs,
+                        start: word.start + result.offset_secs,
+                        end: word.end + result.offset_secs,
                         confidence: word.confidence,
                         speaker: word.speaker,
                         punctuated_word: word.punctuated_word.clone(),
@@ -369,21 +430,6 @@ async fn run_batch_chunked<A: BatchSttAdapter>(
                 }
             }
         }
-
-        let percentage = (idx + 1) as f64 / total_chunks as f64;
-        runtime.emit(BatchEvent::BatchChunkProgress {
-            session_id: params.session_id.clone(),
-            chunk: idx + 1,
-            total_chunks,
-            percentage,
-        });
-
-        tracing::info!(
-            chunk = idx + 1,
-            total = total_chunks,
-            percentage,
-            "chunk transcription completed"
-        );
     }
 
     let avg_confidence = if confidence_count > 0 {
