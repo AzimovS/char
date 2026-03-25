@@ -41,6 +41,13 @@ pub enum BatchEvent {
         response: StreamResponse,
         percentage: f64,
     },
+    #[serde(rename = "batchChunkProgress")]
+    BatchChunkProgress {
+        session_id: String,
+        chunk: usize,
+        total_chunks: usize,
+        percentage: f64,
+    },
     #[serde(rename = "batchFailed")]
     BatchFailed {
         session_id: String,

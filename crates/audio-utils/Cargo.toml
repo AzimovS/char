@@ -16,6 +16,7 @@ tracing = { workspace = true }
 hound = { workspace = true }
 rodio = { workspace = true, features = ["symphonia-all"] }
 rubato = "1.0.1"
+tempfile = { workspace = true }
 vorbis_rs = { workspace = true }
 
 [dev-dependencies]

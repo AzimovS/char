@@ -94,6 +94,11 @@ export const runBatchSession = async <T extends BatchStore>(
           return;
         }
 
+        if (payload.type === "batchChunkProgress") {
+          get().updateBatchProgress(sessionId, payload.percentage);
+          return;
+        }
+
         if (payload.type === "batchFailed") {
           rejectFailure(payload.error, reject);
         }

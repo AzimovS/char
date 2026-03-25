@@ -104,6 +104,9 @@ pub async fn run_batch(
     result
 }
 
+const CHUNK_DURATION_MS: u64 = 2 * 60 * 1000;
+const CHUNK_THRESHOLD_SECS: f64 = 120.0;
+
 async fn run_batch_inner(
     runtime: Arc<dyn BatchRuntime>,
     params: BatchParams,
@@ -150,36 +153,85 @@ async fn run_batch_inner(
         BatchProvider::Am | BatchProvider::Cactus => {
             run_batch_streaming(runtime, params, listen_params).await
         }
-        BatchProvider::Argmax => run_batch_simple::<ArgmaxAdapter>(params, listen_params).await,
-        BatchProvider::Deepgram => run_batch_simple::<DeepgramAdapter>(params, listen_params).await,
-        BatchProvider::Soniox => run_batch_simple::<SonioxAdapter>(params, listen_params).await,
-        BatchProvider::AssemblyAI => {
-            run_batch_simple::<AssemblyAIAdapter>(params, listen_params).await
-        }
-        BatchProvider::Fireworks => {
-            run_batch_simple::<FireworksAdapter>(params, listen_params).await
-        }
-        BatchProvider::OpenAI => run_batch_simple::<OpenAIAdapter>(params, listen_params).await,
-        BatchProvider::Gladia => run_batch_simple::<GladiaAdapter>(params, listen_params).await,
-        BatchProvider::ElevenLabs => {
-            run_batch_simple::<ElevenLabsAdapter>(params, listen_params).await
-        }
         BatchProvider::DashScope => Err(crate::BatchFailure::ProviderRequestFailed {
             message: "DashScope does not support batch transcription".to_string(),
         }
         .into()),
-        BatchProvider::Mistral => run_batch_simple::<MistralAdapter>(params, listen_params).await,
-        BatchProvider::Hyprnote => run_batch_simple::<HyprnoteAdapter>(params, listen_params).await,
+        _ => {
+            let provider = params.provider.clone();
+            dispatch_batch_simple(&provider, runtime, params, listen_params).await
+        }
+    }
+}
+
+async fn dispatch_batch_simple(
+    provider: &BatchProvider,
+    runtime: Arc<dyn BatchRuntime>,
+    params: BatchParams,
+    listen_params: owhisper_interface::ListenParams,
+) -> crate::Result<BatchRunOutput> {
+    match provider {
+        BatchProvider::Argmax => {
+            run_batch_simple::<ArgmaxAdapter>(runtime, params, listen_params).await
+        }
+        BatchProvider::Deepgram => {
+            run_batch_simple::<DeepgramAdapter>(runtime, params, listen_params).await
+        }
+        BatchProvider::Soniox => {
+            run_batch_simple::<SonioxAdapter>(runtime, params, listen_params).await
+        }
+        BatchProvider::AssemblyAI => {
+            run_batch_simple::<AssemblyAIAdapter>(runtime, params, listen_params).await
+        }
+        BatchProvider::Fireworks => {
+            run_batch_simple::<FireworksAdapter>(runtime, params, listen_params).await
+        }
+        BatchProvider::OpenAI => {
+            run_batch_simple::<OpenAIAdapter>(runtime, params, listen_params).await
+        }
+        BatchProvider::Gladia => {
+            run_batch_simple::<GladiaAdapter>(runtime, params, listen_params).await
+        }
+        BatchProvider::ElevenLabs => {
+            run_batch_simple::<ElevenLabsAdapter>(runtime, params, listen_params).await
+        }
+        BatchProvider::Mistral => {
+            run_batch_simple::<MistralAdapter>(runtime, params, listen_params).await
+        }
+        BatchProvider::Hyprnote => {
+            run_batch_simple::<HyprnoteAdapter>(runtime, params, listen_params).await
+        }
+        _ => unreachable!(),
     }
 }
 
 async fn run_batch_simple<A: BatchSttAdapter>(
+    runtime: Arc<dyn BatchRuntime>,
     params: BatchParams,
     listen_params: owhisper_interface::ListenParams,
 ) -> crate::Result<BatchRunOutput> {
     let span = session_span(&params.session_id);
 
     async {
+        let duration_result = tokio::task::spawn_blocking({
+            let path = params.file_path.clone();
+            move || hypr_audio_utils::audio_duration_secs(path)
+        })
+        .await;
+
+        let audio_duration_secs = match duration_result {
+            Ok(Ok(d)) => d,
+            _ => 0.0,
+        };
+
+        if audio_duration_secs > CHUNK_THRESHOLD_SECS {
+            tracing::info!(
+                duration_secs = audio_duration_secs,
+                "audio exceeds chunk threshold, using chunked transcription"
+            );
+            return run_batch_chunked::<A>(runtime, params, listen_params).await;
+        }
+
         let client = owhisper_client::BatchClient::<A>::builder()
             .api_base(params.base_url.clone())
             .api_key(params.api_key.clone())
@@ -210,6 +262,240 @@ async fn run_batch_simple<A: BatchSttAdapter>(
     }
     .instrument(span)
     .await
+}
+
+const CHUNK_CONCURRENCY: usize = 4;
+
+struct ChunkResult {
+    idx: usize,
+    offset_secs: f64,
+    response: owhisper_interface::batch::Response,
+}
+
+async fn run_batch_chunked<A: BatchSttAdapter>(
+    runtime: Arc<dyn BatchRuntime>,
+    params: BatchParams,
+    listen_params: owhisper_interface::ListenParams,
+) -> crate::Result<BatchRunOutput> {
+    let chunks = tokio::task::spawn_blocking({
+        let path = params.file_path.clone();
+        move || hypr_audio_utils::chunk_audio_to_wav_files(path, CHUNK_DURATION_MS)
+    })
+    .await
+    .map_err(|err| {
+        let message = format!("Failed to chunk audio: {err}");
+        tracing::error!(error = %message, "audio_chunk_task_join_failed");
+        crate::BatchFailure::ProviderRequestFailed { message }
+    })?
+    .map_err(|err| {
+        let message = format_user_friendly_error(&err.to_string());
+        tracing::error!(error = %err, "failed_to_chunk_audio");
+        crate::BatchFailure::ProviderRequestFailed { message }
+    })?;
+
+    let total_chunks = chunks.len();
+    tracing::info!(
+        total_chunks,
+        concurrency = CHUNK_CONCURRENCY,
+        "split audio into chunks for parallel batch transcription"
+    );
+
+    if chunks.is_empty() {
+        return Ok(BatchRunOutput {
+            session_id: params.session_id,
+            mode: BatchRunMode::Direct,
+            response: owhisper_interface::batch::Response {
+                metadata: serde_json::json!({}),
+                results: owhisper_interface::batch::Results {
+                    channels: vec![owhisper_interface::batch::Channel {
+                        alternatives: vec![owhisper_interface::batch::Alternatives {
+                            transcript: String::new(),
+                            confidence: 0.0,
+                            words: Vec::new(),
+                        }],
+                    }],
+                },
+            },
+        });
+    }
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(CHUNK_CONCURRENCY));
+    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (cancel_tx, _) = tokio::sync::watch::channel(false);
+
+    let mut handles = Vec::with_capacity(total_chunks);
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let semaphore = semaphore.clone();
+        let completed = completed.clone();
+        let runtime = runtime.clone();
+        let session_id = params.session_id.clone();
+        let offset_secs = chunk.start_offset_secs;
+        let chunk_path = chunk.file.path().to_path_buf();
+        let mut cancel_rx = cancel_tx.subscribe();
+        let client = owhisper_client::BatchClient::<A>::builder()
+            .api_base(params.base_url.clone())
+            .api_key(params.api_key.clone())
+            .params(listen_params.clone())
+            .build();
+
+        let handle = tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.map_err(|_| {
+                crate::Error::from(crate::BatchFailure::ProviderRequestFailed {
+                    message: "Chunk semaphore closed".to_string(),
+                })
+            })?;
+
+            if *cancel_rx.borrow() {
+                return Err(crate::Error::from(
+                    crate::BatchFailure::ProviderRequestFailed {
+                        message: "Batch cancelled".to_string(),
+                    },
+                ));
+            }
+
+            tracing::info!(
+                chunk = idx + 1,
+                total = total_chunks,
+                offset_secs,
+                "transcribing chunk"
+            );
+
+            let response = tokio::select! {
+                result = client.transcribe_file(&chunk_path) => {
+                    result.map_err(|err| {
+                        let raw_error = format!("{err:?}");
+                        let message = format_user_friendly_error(&raw_error);
+                        tracing::error!(
+                            error = %raw_error,
+                            chunk = idx + 1,
+                            total = total_chunks,
+                            "chunk transcription failed"
+                        );
+                        crate::Error::from(crate::BatchFailure::ProviderRequestFailed { message })
+                    })?
+                }
+                _ = cancel_rx.changed() => {
+                    tracing::info!(chunk = idx + 1, "chunk cancelled");
+                    return Err(crate::Error::from(crate::BatchFailure::ProviderRequestFailed {
+                        message: "Batch cancelled".to_string(),
+                    }));
+                }
+            };
+
+            let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let percentage = done as f64 / total_chunks as f64;
+            runtime.emit(BatchEvent::BatchChunkProgress {
+                session_id: session_id.clone(),
+                chunk: done,
+                total_chunks,
+                percentage,
+            });
+
+            tracing::info!(
+                chunk = idx + 1,
+                total = total_chunks,
+                done,
+                percentage,
+                "chunk transcription completed"
+            );
+
+            Ok::<ChunkResult, crate::Error>(ChunkResult {
+                idx,
+                offset_secs,
+                response,
+            })
+        });
+        handles.push(handle);
+    }
+
+    let mut results = Vec::with_capacity(total_chunks);
+    let mut first_error: Option<crate::Error> = None;
+    for handle in handles {
+        if first_error.is_some() {
+            handle.abort();
+            continue;
+        }
+        match handle.await {
+            Ok(Ok(chunk_result)) => results.push(chunk_result),
+            Ok(Err(err)) => {
+                let _ = cancel_tx.send(true);
+                first_error = Some(err);
+            }
+            Err(err) => {
+                let _ = cancel_tx.send(true);
+                first_error = Some(
+                    crate::BatchFailure::ProviderRequestFailed {
+                        message: format!("Chunk task panicked: {err}"),
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
+    if let Some(err) = first_error {
+        return Err(err);
+    }
+
+    results.sort_by_key(|r| r.idx);
+
+    let mut all_words: Vec<owhisper_interface::batch::Word> = Vec::new();
+    let mut all_transcripts: Vec<String> = Vec::new();
+    let mut confidence_sum: f64 = 0.0;
+    let mut confidence_count: usize = 0;
+
+    for result in &results {
+        for channel in &result.response.results.channels {
+            if let Some(alt) = channel.alternatives.first() {
+                let transcript = alt.transcript.trim();
+                if !transcript.is_empty() {
+                    all_transcripts.push(transcript.to_string());
+                }
+
+                for word in &alt.words {
+                    all_words.push(owhisper_interface::batch::Word {
+                        word: word.word.clone(),
+                        start: word.start + result.offset_secs,
+                        end: word.end + result.offset_secs,
+                        confidence: word.confidence,
+                        speaker: word.speaker,
+                        punctuated_word: word.punctuated_word.clone(),
+                    });
+                }
+
+                if alt.confidence.is_finite() && alt.confidence > 0.0 {
+                    confidence_sum += alt.confidence;
+                    confidence_count += 1;
+                }
+            }
+        }
+    }
+
+    let avg_confidence = if confidence_count > 0 {
+        confidence_sum / confidence_count as f64
+    } else {
+        0.0
+    };
+
+    let merged_response = owhisper_interface::batch::Response {
+        metadata: serde_json::json!({ "chunked": true, "total_chunks": total_chunks }),
+        results: owhisper_interface::batch::Results {
+            channels: vec![owhisper_interface::batch::Channel {
+                alternatives: vec![owhisper_interface::batch::Alternatives {
+                    transcript: all_transcripts.join(" "),
+                    confidence: avg_confidence,
+                    words: all_words,
+                }],
+            }],
+        },
+    };
+
+    tracing::info!(total_chunks, "chunked batch transcription completed");
+
+    Ok(BatchRunOutput {
+        session_id: params.session_id,
+        mode: BatchRunMode::Direct,
+        response: merged_response,
+    })
 }
 
 pub(super) fn session_span(session_id: &str) -> tracing::Span {
