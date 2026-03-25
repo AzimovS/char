@@ -337,6 +337,77 @@ pub fn chunk_audio_file(
     })
 }
 
+pub struct WavChunk {
+    pub file: tempfile::NamedTempFile,
+    pub start_offset_secs: f64,
+}
+
+pub fn chunk_audio_to_wav_files(
+    path: impl AsRef<std::path::Path>,
+    chunk_duration_ms: u64,
+) -> Result<Vec<WavChunk>, crate::Error> {
+    let source = source_from_path(path)?;
+    let metadata = metadata_from_source(&source)?;
+    let samples = resample_audio(source, metadata.sample_rate)?;
+
+    if samples.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let channels = metadata.channels.max(1) as usize;
+    let sample_rate = metadata.sample_rate;
+    let frames_per_chunk = ((chunk_duration_ms as u128)
+        .saturating_mul(sample_rate as u128)
+        .div_ceil(1000))
+    .max(1)
+    .min(usize::MAX as u128) as usize;
+    let samples_per_chunk = frames_per_chunk.saturating_mul(channels).max(1);
+
+    let _total_frames = samples.len() / channels;
+    let spec = hound::WavSpec {
+        channels: channels as u16,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    let mut chunks = Vec::new();
+    for (chunk_idx, sample_chunk) in samples.chunks(samples_per_chunk).enumerate() {
+        let start_offset_secs = (chunk_idx * frames_per_chunk) as f64 / sample_rate as f64;
+
+        let temp_file = tempfile::Builder::new()
+            .prefix("chunk_")
+            .suffix(".wav")
+            .tempfile()?;
+
+        {
+            let mut writer =
+                hound::WavWriter::new(std::io::BufWriter::new(temp_file.as_file()), spec)?;
+            for &sample in sample_chunk {
+                let i16_sample = (sample * I16_SCALE).clamp(-I16_SCALE, I16_SCALE) as i16;
+                writer.write_sample(i16_sample)?;
+            }
+            writer.finalize()?;
+        }
+
+        chunks.push(WavChunk {
+            file: temp_file,
+            start_offset_secs,
+        });
+    }
+
+    Ok(chunks)
+}
+
+pub fn audio_duration_secs(path: impl AsRef<std::path::Path>) -> Result<f64, crate::Error> {
+    let source = source_from_path(&path)?;
+    let metadata = metadata_from_source(&source)?;
+    let total_samples: usize = source.count();
+    let channels = metadata.channels.max(1) as usize;
+    let frames = total_samples / channels;
+    Ok(frames as f64 / metadata.sample_rate as f64)
+}
+
 pub fn chunk_size_for_stt(sample_rate: u32) -> usize {
     // https://github.com/orgs/deepgram/discussions/224#discussioncomment-6234166
     const CHUNK_MS: u32 = 120;

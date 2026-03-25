@@ -94,6 +94,17 @@ pub async fn run(args: BatchArgs, stt: SttGlobalArgs, quiet: bool) -> CliResult<
             BatchEvent::BatchResponse { response: next, .. } => {
                 batch_response = Some(next);
             }
+            BatchEvent::BatchChunkProgress { percentage, .. } => {
+                let Some(progress) = &progress else {
+                    continue;
+                };
+                let percent = (percentage * 100.0).round().clamp(0.0, 100.0) as i8;
+                if percent == last_progress_percent {
+                    continue;
+                }
+                last_progress_percent = percent;
+                progress.set_position(percent as u64);
+            }
             BatchEvent::BatchFailed { code, error, .. } => {
                 failure = Some((code, error));
             }
