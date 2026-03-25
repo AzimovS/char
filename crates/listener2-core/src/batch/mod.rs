@@ -321,6 +321,7 @@ async fn run_batch_chunked<A: BatchSttAdapter>(
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(CHUNK_CONCURRENCY));
     let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (cancel_tx, _) = tokio::sync::watch::channel(false);
 
     let mut handles = Vec::with_capacity(total_chunks);
     for (idx, chunk) in chunks.iter().enumerate() {
@@ -330,6 +331,7 @@ async fn run_batch_chunked<A: BatchSttAdapter>(
         let session_id = params.session_id.clone();
         let offset_secs = chunk.start_offset_secs;
         let chunk_path = chunk.file.path().to_path_buf();
+        let mut cancel_rx = cancel_tx.subscribe();
         let client = owhisper_client::BatchClient::<A>::builder()
             .api_base(params.base_url.clone())
             .api_key(params.api_key.clone())
@@ -343,6 +345,14 @@ async fn run_batch_chunked<A: BatchSttAdapter>(
                 })
             })?;
 
+            if *cancel_rx.borrow() {
+                return Err(crate::Error::from(
+                    crate::BatchFailure::ProviderRequestFailed {
+                        message: "Batch cancelled".to_string(),
+                    },
+                ));
+            }
+
             tracing::info!(
                 chunk = idx + 1,
                 total = total_chunks,
@@ -350,17 +360,27 @@ async fn run_batch_chunked<A: BatchSttAdapter>(
                 "transcribing chunk"
             );
 
-            let response = client.transcribe_file(&chunk_path).await.map_err(|err| {
-                let raw_error = format!("{err:?}");
-                let message = format_user_friendly_error(&raw_error);
-                tracing::error!(
-                    error = %raw_error,
-                    chunk = idx + 1,
-                    total = total_chunks,
-                    "chunk transcription failed"
-                );
-                crate::Error::from(crate::BatchFailure::ProviderRequestFailed { message })
-            })?;
+            let response = tokio::select! {
+                result = client.transcribe_file(&chunk_path) => {
+                    result.map_err(|err| {
+                        let raw_error = format!("{err:?}");
+                        let message = format_user_friendly_error(&raw_error);
+                        tracing::error!(
+                            error = %raw_error,
+                            chunk = idx + 1,
+                            total = total_chunks,
+                            "chunk transcription failed"
+                        );
+                        crate::Error::from(crate::BatchFailure::ProviderRequestFailed { message })
+                    })?
+                }
+                _ = cancel_rx.changed() => {
+                    tracing::info!(chunk = idx + 1, "chunk cancelled");
+                    return Err(crate::Error::from(crate::BatchFailure::ProviderRequestFailed {
+                        message: "Batch cancelled".to_string(),
+                    }));
+                }
+            };
 
             let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             let percentage = done as f64 / total_chunks as f64;
@@ -389,13 +409,31 @@ async fn run_batch_chunked<A: BatchSttAdapter>(
     }
 
     let mut results = Vec::with_capacity(total_chunks);
+    let mut first_error: Option<crate::Error> = None;
     for handle in handles {
-        let result = handle
-            .await
-            .map_err(|err| crate::BatchFailure::ProviderRequestFailed {
-                message: format!("Chunk task panicked: {err}"),
-            })??;
-        results.push(result);
+        if first_error.is_some() {
+            handle.abort();
+            continue;
+        }
+        match handle.await {
+            Ok(Ok(chunk_result)) => results.push(chunk_result),
+            Ok(Err(err)) => {
+                let _ = cancel_tx.send(true);
+                first_error = Some(err);
+            }
+            Err(err) => {
+                let _ = cancel_tx.send(true);
+                first_error = Some(
+                    crate::BatchFailure::ProviderRequestFailed {
+                        message: format!("Chunk task panicked: {err}"),
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
+    if let Some(err) = first_error {
+        return Err(err);
     }
 
     results.sort_by_key(|r| r.idx);
