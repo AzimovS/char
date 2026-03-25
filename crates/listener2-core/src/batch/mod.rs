@@ -104,8 +104,8 @@ pub async fn run_batch(
     result
 }
 
-const CHUNK_DURATION_MS: u64 = 2 * 60 * 1000;
-const CHUNK_THRESHOLD_SECS: f64 = 120.0;
+const CHUNK_DURATION_MS: u64 = 30 * 1000;
+const CHUNK_THRESHOLD_SECS: f64 = 60.0;
 
 async fn run_batch_inner(
     runtime: Arc<dyn BatchRuntime>,
@@ -521,6 +521,9 @@ pub(super) fn format_user_friendly_error(error: &str) -> String {
         || error_lower.contains("entity too large")
     {
         return "The audio file is too large for this provider. Try a shorter recording or check your provider's file size limits.".to_string();
+    }
+    if error_lower.contains("504") || error_lower.contains("gateway timeout") {
+        return "Server gateway timed out processing the audio. The chunk may be too large for this provider.".to_string();
     }
     if error_lower.contains("timeout") || error_lower.contains("timed out") {
         return "Transcription request timed out. The audio file may be too large for this provider, or the server is unresponsive. Try a shorter recording or a different provider.".to_string();

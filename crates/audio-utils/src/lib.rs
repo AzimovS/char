@@ -342,20 +342,30 @@ pub struct WavChunk {
     pub start_offset_secs: f64,
 }
 
+const STT_SAMPLE_RATE: u32 = 16000;
+
 pub fn chunk_audio_to_wav_files(
     path: impl AsRef<std::path::Path>,
     chunk_duration_ms: u64,
 ) -> Result<Vec<WavChunk>, crate::Error> {
     let source = source_from_path(path)?;
     let metadata = metadata_from_source(&source)?;
-    let samples = resample_audio(source, metadata.sample_rate)?;
+    let resampled = resample_audio(source, STT_SAMPLE_RATE)?;
+
+    // Mix down to mono for STT
+    let orig_channels = metadata.channels.max(1) as usize;
+    let samples: Vec<f32> = if orig_channels > 1 {
+        mono_frames(resampled.into_iter(), orig_channels).collect()
+    } else {
+        resampled
+    };
 
     if samples.is_empty() {
         return Ok(Vec::new());
     }
 
-    let channels = metadata.channels.max(1) as usize;
-    let sample_rate = metadata.sample_rate;
+    let channels = 1usize;
+    let sample_rate = STT_SAMPLE_RATE;
     let frames_per_chunk = ((chunk_duration_ms as u128)
         .saturating_mul(sample_rate as u128)
         .div_ceil(1000))
@@ -363,7 +373,6 @@ pub fn chunk_audio_to_wav_files(
     .min(usize::MAX as u128) as usize;
     let samples_per_chunk = frames_per_chunk.saturating_mul(channels).max(1);
 
-    let _total_frames = samples.len() / channels;
     let spec = hound::WavSpec {
         channels: channels as u16,
         sample_rate,
